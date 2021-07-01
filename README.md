@@ -19,14 +19,12 @@ The project is intended to be deployed on Gcloud-Kubernetes-Docker, but it
 could easily be adapted to other platforms.
 
 
-## Logic of the corpus-making process
-
-
 ## Building, running, controlling the container
 
-- building: `docker stop $(docker ps -a -q); docker rm ds_corpus_maker_sample ; docker build -t ds_corpus_maker_sample:latest . ;`
-- attached: `docker run --shm-size=512m -i -t -p 9802:9802 --name ds_corpus_maker_sample ds_corpus_maker_sample:latest`
-- detached: `docker run --shm-size=512m -i -t -d -p 9802:9802 --name ds_corpus_maker_sample ds_corpus_maker_sample:latest`
+- one-liner for testing: `docker stop $(docker ps -a -q); docker rm corpus_maker_example ; docker build -t corpus_maker_example:latest . ; docker run --shm-size=512m -i -t -p 9802:9802 --name corpus_maker_example corpus_maker_example:latest`
+
+- building: `docker stop $(docker ps -a -q); docker rm corpus_maker_example ; docker build -t corpus_maker_example:latest . ;`
+- attached: `docker run --shm-size=512m -i -t -p 9802:9802 --name corpus_maker_example corpus_maker_example:latest`
+- detached: `docker run --shm-size=512m -i -t -d -p 9802:9802 --name corpus_maker_example corpus_maker_example:latest`
 - control: `docker ps`
-- logs: `docker logs ds_corpus_maker_sample`
-# ds_corpus_maker_sample
+- logs: `docker logs corpus_maker_example`
