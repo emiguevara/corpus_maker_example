@@ -1,5 +1,4 @@
 import os
-import bz2
 import gzip
 import shutil
 import re
@@ -7,15 +6,10 @@ import pickle
 import json
 import falcon
 import srsly
-import random
-import urllib
-import copy
-import mwparserfromhell
 
 from time import time
-from datetime import date, datetime, timedelta
-from multiprocessing import Process, Queue, Manager
-from xml import sax
+from datetime import datetime, timedelta
+from multiprocessing import Process
 from http import client as httpcl
 from html.parser import HTMLParser
 
@@ -185,7 +179,7 @@ def process_text(acp_text):
     acp_text = re.sub(' +', ' ', acp_text)
 
     # this is where we could add Spacy NLP, tokenisation, lemmas, etc
-    #acp_text = nlp_obj(acp_text)
+    # acp_text = nlp_obj(acp_text)
 
     return acp_text
 
@@ -335,212 +329,122 @@ def search_from_acp_api(auth_token=None, publication=None, start_date=None, end_
 #########################################################################################
 # 3. Cloud config and utilities: left here mainly as an example, we are not using them at all
 
-# do we have an authorised client connection to Google buckets?
-# the connections at Amedia are used to save/read corpus files
-# and to download packaged models that we are not going to use in this instance
-# this try/except block will fail
-
-# Storage bucket info
 DS_BUCKET_NAME = 'amedia-ds-research'
 DS_BUCKET_CORPUS_FOLDER = 'amedia_nlp_research'
 DS_BUCKET_MODEL_FOLDER = 'amedia_nlp_models'
-
-# local model folder
-LOCAL_MODEL_FOLDER = 'data'
-
-BQ_CLIENT = None
 ST_CLIENT = None
+
 try:
     # auth key files must be provided
-    # BQ auth
-    KEY_FILE_BQ = 'google_auth.json'
-    PROJECT_ID_BQ = json.load(open(KEY_FILE_BQ))['project_id']
-    CREDENTIALS_BQ = service_account.Credentials.from_service_account_file(KEY_FILE_BQ)
-
-    # Storage bucket DS auth
     KEY_FILE_DS = 'google_auth.json'
     PROJECT_ID_DS = json.load(open(KEY_FILE_DS))['project_id']
     CREDENTIALS_DS = service_account.Credentials.from_service_account_file(KEY_FILE_DS)
-
-    print('BQ/ST #########################################')
-    BQ_CLIENT = bigquery.Client(project=PROJECT_ID_BQ, credentials=CREDENTIALS_BQ)
     ST_CLIENT = storage.Client(project=PROJECT_ID_DS, credentials=CREDENTIALS_DS)
-    print('Downloading models ############################')
-    to_download = [
-        (None, None),
-        #(CLOUD_MODEL_FILE_KAT20, LOCAL_MODEL_FILE_KAT20),
-        #(CLOUD_MODEL_FILE_SPORT, LOCAL_MODEL_FILE_SPORT),
-      ]
-    for source_blob_name, destination_file_name in to_download:
-        if not os.path.exists(destination_file_name) and not os.path.isfile(destination_file_name):
-            download_bucket_blob(DS_BUCKET_NAME, source_blob_name, destination_file_name, ST_CLIENT)
-        else:
-            print(
-                'Model file found in container',
-                destination_file_name,
-                os.path.exists(destination_file_name),
-                os.path.isfile(destination_file_name)
-            )
 except Exception as e:
-        print('BQ_CLIENT/ST_CLIENT file load failed', e)
+    print('ST_CLIENT file load failed', e)
+
 
 #########################################################################################
 # 4. Class definition
 
+
 class CompileCorpus(object):
     def __init__(self):
         self.corpus = []
-        self.time_period_hours = 3
         self.nlp = None  # normally, we would pass our NLP object/class
         self.cloud_client = ST_CLIENT
         self.cloud_bucket = DS_BUCKET_NAME
         self.cloud_bucket_folder = DS_BUCKET_CORPUS_FOLDER
         self.files_in_bucket_folder = []
-        self.corpus_years = [2021]
-        self.corpus_months = [5, 6]
 
     def on_get(self, req, resp):
-        """Starts compiling demo dataset from default values."""
+        """Starts compiling corpus."""
         try:
             self.fork_process()
         except Exception as er:
-            raise falcon.HTTPError(falcon.HTTP_400, "Could not fetch data from DB. fork_data_fetching_process()", er)
-        finally:
-            print('Process fetching data finished. New data saved.')
+            raise falcon.HTTPError(falcon.HTTP_400, er)
 
-    def fork_process(self, dry_run=False):
-        """Start a parallel process that decides if we need new data, fetches from DB and saves to datafile."""
-        print('Forking process')
-        p = Process(target=self.data_manager, kwargs={'dry_run': dry_run})  # args=(), kwargs={}, daemon=True
+    def fork_process(self):
+        """Start a parallel process to compile a corpus"""
+        p = Process(target=self.data_manager)
         p.start()
         p.join()
 
-    def data_manager(self, dry_run=False):
+    def data_manager(self):
         """This method manages the whole data fetching and saving process.
-        It generates a list of corpus periods in the years/months configured,
-        and for each of these, target filenames and time-slices to be fetched.
+        With a list of corpus periods, it generates target filenames and
+        3 hour time-slices to be fetched from the Amedia ACP API.
         Then, for each time-slice in each period, we send a search request,
         fetch text and process it. The results are saved to a local file,
         which is compressed at the end of the period, and uploaded to a bucket.
         """
 
-        now = datetime.now()
-
-        # get a list of files already present in the bucket
-        self.files_in_bucket_folder = [
-            # blob.name for blob in self.cloud_client.list_blobs(self.cloud_bucket, prefix=self.cloud_bucket_folder)
-        ]
-
-        # build permutations of years/months/found
         corpus_periods = [
-            {
-                'year': x,
-                'month': y,
-                'date_str': '{!s}{:02d}'.format(x, y),
-                'found': z
-            } for x in self.corpus_years for y in self.corpus_months for z in [False]
+            {'year': 2022, 'month': 1, 'date_str': '202201'},
+            {'year': 2022, 'month': 2, 'date_str': '202202'}
         ]
-        # discard corpus periods in the future
-        corpus_periods = [c for c in corpus_periods if not (datetime(c['year'], c['month'], 1, 0, 0, 0) > now)]
 
         # build filename parts to be used...
-        # are we going to have full or partial periods?
-        period_full = '_full'
-        period_part = '_part'
-        corpus_version = '_v01'
-        file_ext = ['jsonl', 'gz']
         file_prefix = 'corpus_acp_nlp_monthly_'
-        templ_local_prefix = 'data_processed' + '/' + file_prefix
+        templ_local_prefix = 'data_processed/' + file_prefix
         templ_cloud_prefix = self.cloud_bucket_folder + '/' + file_prefix
-        templ_suffix = corpus_version + '.' + file_ext[0]
-        templ_suffix_gz = corpus_version + '.' + file_ext[0] + '.' + file_ext[1]
+        templ_suffix = '.jsonl'
+        templ_suffix_gz = '.jsonl.gz'
+        # generate filenames
+        for c in [c for c in corpus_periods]:
+            c['to_create_local'] = templ_local_prefix + c['date_str'] + templ_suffix
+            c['to_create_cloud'] = templ_cloud_prefix + c['date_str'] + templ_suffix_gz
 
-        # for each period, generate time slices in truncated iso 8601 format, interval 3 hours
-        for c in [c for c in corpus_periods if not c['found']]:
-            print('Processing', c)
-            time_slices = []
-            step = timedelta(hours=self.time_period_hours)
+        # generate time slices in truncated iso 8601 format, 3 hours
+        time_slices = []
+        for c in [c for c in corpus_periods]:
+            step = timedelta(hours=3)
             start = datetime(c['year'], c['month'], 1, 0, 0, 0)
-            # end must be calculated, but timedelta has not implemented months: end = start + timedelta(months=1)
-            # do it manually: add 1 to month if month is not december, else add 1 to year and month is january
-            if c['month'] < 12:
-                end = datetime(c['year'], c['month'] + 1, 1, 0, 0, 0)
-            else:
-                end = datetime(c['year'] + 1, 1, 1, 0, 0, 0)
-            # do not make slices in the future
-            if end > now:
-                end = now
-            # chunks with found === False must be created, adapt name to period full vs partial
-            if now > end:
-                c['to_create_local'] = templ_local_prefix + c['date_str'] + period_full + templ_suffix
-                c['to_create_cloud'] = templ_cloud_prefix + c['date_str'] + period_full + templ_suffix_gz
-            else:
-                c['to_create_local'] = templ_local_prefix + c['date_str'] + period_part + templ_suffix
-                c['to_create_cloud'] = templ_cloud_prefix + c['date_str'] + period_part + templ_suffix_gz
-
+            end = datetime(c['year'], c['month'] + 1, 1, 0, 0, 0)
             while start < end:
-                time_slices.append(
-                    {
-                        't_start': start.strftime('%Y-%m-%dT%H:%M:%S'),
-                        't_end': (start + step).strftime('%Y-%m-%dT%H:%M:%S')
-                    }
-                )
+                time_slices.append({'t_start': start.strftime('%Y-%m-%dT%H:%M:%S'),
+                                    't_end': (start + step).strftime('%Y-%m-%dT%H:%M:%S')})
                 start += step
 
-            print('Fetching acp_text from ACP ########################')
-            t0 = time()
-            # reduce time slices for testing
-            if len(time_slices) > 10:
-                time_slices = time_slices[-10:]
-            print('Reducing time slices for period to ', len(time_slices))
-            for p in time_slices:
-                try:
-                    self.fetch_corpus(start_date=p['t_start'], end_date=p['t_end'])
-                except Exception as er:
-                    print("Could not fetch text_corpus from ACP. Period:", p, "Error:", er)
+        print('Fetching acp_text from ACP ####################')
+        # reduce time slices for testing
+        if len(time_slices) > 200:
+            time_slices = time_slices[-200:]
 
+        for p in time_slices:
             try:
-                print(time_slices[0]['t_start'], time_slices[-1]['t_end'], 'Art', len(self.corpus), 'Time', time() - t0, 's.')
-            except Exception as ex:
-                print('Art', len(self.corpus), ex)
+                self.fetch_corpus(start_date=p['t_start'], end_date=p['t_end'])
+            except Exception as er:
+                print("Could not fetch text_corpus from ACP. Period:", p, "Error:", er)
 
-            print('Annotating acp_articles ###########################')
-            if self.corpus:
-                print('Articles in text_corpus:', len(self.corpus))
-                try:
-                    t0 = time()
-                    self.process_corpus(target_file=c['to_create_local'])
-                    # local corpus file is saved, let us gzip it
-                    self.compress_corpus(c['to_create_local'], c['to_create_local'] + '.gz')
-                    self.save_corpus(c['to_create_local'] + '.gz', c['to_create_cloud'])
-                    os.remove(c['to_create_local'] + '.gz')
-                    print('Done annotating!', 'Elapsed', time() - t0, 'seconds')
-                except Exception as er:
-                   print("Could not annotate data.", er)
-                finally:
-                    print('###############################################')
-                    for a in self.corpus:
-                        print('###', a['url'])
-                        print(a['nlp_text'])
-                    print('###############################################')
-                    # after successful save, empty our corpus
-                    self.corpus = []
-            print('###############################################')
-
+        print('Annotating acp_articles #######################')
+        if self.corpus:
+            print('Articles in text_corpus:', len(self.corpus))
+            try:
+                t0 = time()
+                self.process_corpus(target_file=c['to_create_local'])
+                # local corpus file is saved, let us gzip it
+                self.compress_corpus(c['to_create_local'], c['to_create_local'] + '.gz')
+                self.save_corpus(c['to_create_local'] + '.gz', c['to_create_cloud'])
+                print('Done annotating!', 'Elapsed', time() - t0, 'seconds')
+            except Exception as er:
+                print("Could not annotate data.", er)
+            finally:
+                print('###############################################')
+                for a in self.corpus:
+                    print('###', a['url'])
+                    print(a['nlp_text'])
+        else:
+            print('No articles in corpus')
         return
 
     def fetch_corpus(self, start_date=None, end_date=None):
         # fetching ACP acp_text
-        t0 = time()
-
         fetched = []
         for pub in ALL_CORPUS_PUBLICATIONS:
-            fetched += search_from_acp_api(
-                publication=pub,
-                start_date=start_date,
-                end_date=end_date
-            )
+            fetched += search_from_acp_api(publication=pub, start_date=start_date, end_date=end_date)
         self.corpus += fetched
+        print(f'Fetched ACP between {start_date} and {end_date}. Corpus length {len(self.corpus)}')
         return
 
     def process_corpus(self, target_file=None, batch_size=1000):
@@ -609,7 +513,6 @@ if __name__ == "__main__":
     print('Running as __main__ ###########################')
 
     try:
-        print('###############################################')
         print('Compile Amedia corpus in a separate thread ####')
         this_compilation = CompileCorpus()
         this_compilation.fork_process()
@@ -620,8 +523,7 @@ if __name__ == "__main__":
 
 #########################################################################################
 # alternatively, it can be run as a Restful API
-#api = falcon.API()
-
+# api = falcon.API()
 # add endpoint for each relevant class
-#api.add_route('/amedia', CompileCorpus())
+# api.add_route('/amedia', CompileCorpus())
 
